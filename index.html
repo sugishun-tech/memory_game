@@ -62,7 +62,7 @@
     background: rgba(17,24,39,.86);
     box-shadow: 0 14px 30px var(--shadow);
     display: grid;
-    grid-template-columns: repeat(6, minmax(130px, 1fr));
+    grid-template-columns: repeat(7, minmax(130px, 1fr));
     gap: 12px;
   }
 
@@ -399,6 +399,11 @@
   </label>
 
   <label>
+    CPU直前記憶能力(0〜2)
+    <input id="cpuRecentMemory" type="number" min="0" max="2" step="1" value="1">
+  </label>
+
+  <label>
     CPU思考速度(ms)
     <input id="cpuDelay" type="number" min="80" step="20" value="450">
   </label>
@@ -459,6 +464,7 @@
   const els = {
     playerCount: document.getElementById("playerCount"),
     cpuMemory: document.getElementById("cpuMemory"),
+    cpuRecentMemory: document.getElementById("cpuRecentMemory"),
     cpuDelay: document.getElementById("cpuDelay"),
     closeDelay: document.getElementById("closeDelay"),
     cpuRisk: document.getElementById("cpuRisk"),
@@ -646,11 +652,11 @@
     };
   }
 
-  function newPlayers(count, memoryLimit) {
+  function newPlayers(count, memoryLimit, recentMemoryLimit) {
     const players = [];
-    players.push({ name: "あなた", cpu: false, score: 0, memory: [], memoryLimit });
+    players.push({ name: "あなた", cpu: false, score: 0, memory: [], recentMemory: [], memoryLimit, recentMemoryLimit });
     for (let i = 2; i <= count; i++) {
-      players.push({ name: `CPU ${i - 1}`, cpu: true, score: 0, memory: [], memoryLimit });
+      players.push({ name: `CPU ${i - 1}`, cpu: true, score: 0, memory: [], recentMemory: [], memoryLimit, recentMemoryLimit });
     }
     return players;
   }
@@ -658,18 +664,20 @@
   function startGame() {
     const playerCount = clamp(Number(els.playerCount.value) || 1, 1, 5);
     const memoryLimit = Math.max(0, Math.floor(Number(els.cpuMemory.value) || 0));
+    const recentMemoryLimit = clamp(Math.floor(Number(els.cpuRecentMemory.value) || 0), 0, 2);
     const layout = calculateLayout();
 
     state = {
       layout,
       deck: buildDeck(layout.pairs),
-      players: newPlayers(playerCount, memoryLimit),
+      players: newPlayers(playerCount, memoryLimit, recentMemoryLimit),
       current: 0,
       selected: [],
       locked: false,
       matchedPairs: 0,
       totalFlips: 0,
       turnNumber: 1,
+      openedThisTurn: [],
       cpuDelay: clamp(Number(els.cpuDelay.value) || 450, 80, 2000),
       closeDelay: clamp(Number(els.closeDelay.value) || 1200, 200, 5000),
       cpuRisk: Number(els.cpuRisk.value) || .8
@@ -716,7 +724,7 @@
     state.players.forEach((p, i) => {
       const div = document.createElement("div");
       div.className = "player" + (i === state.current ? " active" : "");
-      const memoryText = p.cpu ? `短期記憶 ${p.memory.length}/${p.memoryLimit}` : "手動操作";
+      const memoryText = p.cpu ? `短期 ${p.memory.length}/${p.memoryLimit} / 直前 ${p.recentMemory.length}/${p.recentMemoryLimit}` : "手動操作";
       div.innerHTML = `<strong>${escapeHtml(p.name)}: ${p.score}ペア</strong><div class="small">${memoryText}</div>`;
       els.scoreboard.appendChild(div);
     });
@@ -746,6 +754,7 @@
     card.seenCount += 1;
     state.totalFlips += 1;
     state.selected.push(idx);
+    state.openedThisTurn.push(idx);
     rememberAll(idx);
     updateCardDom(idx);
 
@@ -767,6 +776,7 @@
       state.matchedPairs += 1;
       removeMatchedFromCpuMemory(a, b);
       state.selected = [];
+      state.openedThisTurn = [];
       updateCardDom(a);
       updateCardDom(b);
       setMessage(`${state.players[state.current].name} が ${c1.rank} を揃えました。もう一手。`);
@@ -789,6 +799,7 @@
     state.selected = [];
     updateCardDom(a);
     updateCardDom(b);
+    updateRecentMemoryForAll(state.openedThisTurn);
     nextTurn();
     state.locked = false;
     renderScoreboard();
@@ -807,6 +818,9 @@
   }
 
   function rememberAll(idx) {
+    // 全CPUが盤面で開かれたカードを見る。
+    // ただし「直前記憶」はここでは更新しない。
+    // 直前記憶は、前プレイヤーのターン終了時に、そのターンで最後に開かれたカードだけで上書きする。
     for (const p of state.players) {
       if (!p.cpu) continue;
       rememberOne(p, idx);
@@ -814,18 +828,59 @@
     renderScoreboard();
   }
 
+  function makeMemoryItem(idx, source) {
+    const card = state.deck[idx];
+    return {
+      index: idx,
+      pairKey: card.pairKey,
+      rank: card.rank,
+      label: `${card.rank}${card.suit.symbol}`,
+      seenAt: state.turnNumber,
+      confidence: source === "recent" ? 1.25 : 1,
+      source
+    };
+  }
+
   function rememberOne(player, idx) {
     const card = state.deck[idx];
     if (!card || card.matched) return;
     if (player.memory.some(m => m.index === idx)) return;
     if (player.memory.length >= player.memoryLimit) return;
-    player.memory.push({
-      index: idx,
-      pairKey: card.pairKey,
-      label: `${card.rank}${card.suit.symbol}`,
-      seenAt: state.turnNumber,
-      confidence: 1
-    });
+    player.memory.push(makeMemoryItem(idx, "short"));
+  }
+
+  function updateRecentMemoryForAll(openedIndexes) {
+    // 「直前」とは、前のプレイヤーの最後に開いたカード。
+    // 設定値が2なら、そのターンで最後に開いた2枚を覚える。
+    // 設定値が1なら最後の1枚だけ。0なら何も覚えない。
+    if (!openedIndexes || openedIndexes.length === 0) return;
+
+    for (const p of state.players) {
+      if (!p.cpu) continue;
+
+      const limit = clamp(Math.floor(p.recentMemoryLimit || 0), 0, 2);
+      p.recentMemory = [];
+
+      if (limit <= 0) continue;
+
+      const recentIndexes = openedIndexes
+        .slice(-limit)
+        .filter(idx => {
+          const card = state.deck[idx];
+          return card && !card.matched;
+        });
+
+      p.recentMemory = recentIndexes.map(idx => makeMemoryItem(idx, "recent"));
+    }
+  }
+
+  function allCpuMemories(cpu) {
+    // 短期記憶と直前記憶を統合して判断する。
+    // 同じカードが両方にある場合は直前記憶を優先する。
+    const byIndex = new Map();
+    for (const m of cpu.memory) byIndex.set(m.index, m);
+    for (const m of cpu.recentMemory) byIndex.set(m.index, m);
+    return [...byIndex.values()];
   }
 
   function removeMatchedFromCpuMemory(indexA, indexB) {
@@ -837,10 +892,12 @@
     for (const p of state.players) {
       if (!p.cpu) continue;
       p.memory = p.memory.filter(m => !removed.has(m.index));
+      p.recentMemory = p.recentMemory.filter(m => !removed.has(m.index));
     }
   }
 
   function nextTurn() {
+    state.openedThisTurn = [];
     state.current = (state.current + 1) % state.players.length;
     state.turnNumber += 1;
   }
@@ -857,7 +914,7 @@
     // pairKey は現在 `rank-A`, `rank-7` のような数字ベース。
     // つまりCPUも「スート無視、数字一致」で既知ペアを探す。
     const groups = new Map();
-    for (const m of cpu.memory) {
+    for (const m of allCpuMemories(cpu)) {
       const card = state.deck[m.index];
       if (!card || card.matched || card.open) continue;
       if (!groups.has(m.pairKey)) groups.set(m.pairKey, []);
@@ -873,7 +930,7 @@
     const playable = playableIndexes();
     if (!playable.length) return null;
 
-    const memorySet = new Set(cpu.memory.map(m => m.index));
+    const memorySet = new Set(allCpuMemories(cpu).map(m => m.index));
     const total = Math.max(1, state.totalFlips);
     let best = playable[0];
     let bestScore = -Infinity;
@@ -899,7 +956,7 @@
 
     // 1枚目と同じ数字を記憶していれば、それを即座に選ぶ。
     // m.pairKey === first.pairKey は「同じ数字」という意味。
-    const knownMatch = cpu.memory.find(m => {
+    const knownMatch = allCpuMemories(cpu).find(m => {
       const card = state.deck[m.index];
       return m.index !== firstIdx && m.pairKey === first.pairKey && card && !card.matched && !card.open;
     });
@@ -908,7 +965,7 @@
     const playable = playableIndexes();
     if (!playable.length) return null;
 
-    const memoryIndexes = cpu.memory
+    const memoryIndexes = allCpuMemories(cpu)
       .map(m => m.index)
       .filter(idx => {
         const card = state.deck[idx];
@@ -926,7 +983,7 @@
     for (const idx of candidates) {
       const card = state.deck[idx];
       const exploration = Math.sqrt(Math.log(total + 2) / (card.seenCount + 1));
-      const unknownBonus = cpu.memory.some(m => m.index === idx) ? 0.10 : 0.28;
+      const unknownBonus = allCpuMemories(cpu).some(m => m.index === idx) ? 0.10 : 0.28;
       const risk = Math.random() * (0.24 / Math.max(.2, state.cpuRisk));
       const score = exploration + unknownBonus + risk;
       if (score > bestScore) {
@@ -946,7 +1003,7 @@
     }
 
     state.locked = true;
-    setMessage(`${cpu.name} が考えています。短期記憶 ${cpu.memory.length}/${cpu.memoryLimit}。`);
+    setMessage(`${cpu.name} が考えています。短期 ${cpu.memory.length}/${cpu.memoryLimit}、直前 ${cpu.recentMemory.length}/${cpu.recentMemoryLimit}。`);
     renderScoreboard();
 
     await sleep(state.cpuDelay);
