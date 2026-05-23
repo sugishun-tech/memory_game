@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>神経衰弱</title>
+<title>SVG 神経衰弱</title>
 <style>
   :root {
     --bg: #0f172a;
@@ -377,7 +377,8 @@
 <body>
 <header>
   <div>
-    <h1>神経衰弱</h1>
+    <h1>SVG 神経衰弱</h1>
+    <div class="sub">HTML / CSS / バニラJS / SVGのみ。依存ライブラリなし。文明の進歩とは一体。</div>
   </div>
 </header>
 
@@ -433,7 +434,7 @@
 
 <main>
   <div id="board" class="board" aria-label="神経衰弱の盤面"></div>
-  <div class="legend">CPUは見たカードを短期記憶に保存します。容量満杯なら新規カードは覚えません。数字一致でペア成立し、その数字のカードは記憶から消えます。</div>
+  <div class="legend">CPUは見たカードの数字と位置を短期記憶に保存します。容量満杯なら新規カードは覚えません。同じ数字を2枚知っていれば優先して取りに行き、マッチした当該カードだけ記憶から消えます。</div>
 </main>
 
 <div id="modal" class="modal">
@@ -765,7 +766,7 @@
       c2.matched = true;
       state.players[state.current].score += 1;
       state.matchedPairs += 1;
-      removeMatchedFromCpuMemory(c1.pairKey);
+      removeMatchedFromCpuMemory(a, b);
       state.selected = [];
       updateCardDom(a);
       updateCardDom(b);
@@ -828,10 +829,15 @@
     });
   }
 
-  function removeMatchedFromCpuMemory(pairKey) {
+  function removeMatchedFromCpuMemory(indexA, indexB) {
+    // マッチして盤面から消えた「当該カード」だけを、全CPUの短期記憶から消す。
+    // 数字一致ルールなので pairKey 単位で消すと、同じ数字の未取得カードまで忘れてしまう。
+    // 要件は「マッチしたカードが記憶から消える」なので、カード位置 index 単位で消す。
+    const removed = new Set([indexA, indexB]);
+
     for (const p of state.players) {
       if (!p.cpu) continue;
-      p.memory = p.memory.filter(m => m.pairKey !== pairKey);
+      p.memory = p.memory.filter(m => !removed.has(m.index));
     }
   }
 
@@ -849,6 +855,8 @@
   }
 
   function cpuKnownPairs(cpu) {
+    // pairKey は現在 `rank-A`, `rank-7` のような数字ベース。
+    // つまりCPUも「スート無視、数字一致」で既知ペアを探す。
     const groups = new Map();
     for (const m of cpu.memory) {
       const card = state.deck[m.index];
@@ -889,6 +897,9 @@
 
   function chooseCpuSecond(cpu, firstIdx) {
     const first = state.deck[firstIdx];
+
+    // 1枚目と同じ数字を記憶していれば、それを即座に選ぶ。
+    // m.pairKey === first.pairKey は「同じ数字」という意味。
     const knownMatch = cpu.memory.find(m => {
       const card = state.deck[m.index];
       return m.index !== firstIdx && m.pairKey === first.pairKey && card && !card.matched && !card.open;
